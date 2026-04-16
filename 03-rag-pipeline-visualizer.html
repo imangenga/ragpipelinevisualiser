@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RAG Pipeline Visualizer — AI Portfolio</title>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #07080f; color: #e2e8f0; min-height: 100vh; }
+  ::-webkit-scrollbar { width: 5px; } ::-webkit-scrollbar-track { background: #0f1117; } ::-webkit-scrollbar-thumb { background: #2d3748; border-radius: 3px; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+  @keyframes slideIn { from{opacity:0;transform:translateX(-10px)} to{opacity:1;transform:translateX(0)} }
+  @keyframes glow { 0%,100%{box-shadow:0 0 4px #10b98140} 50%{box-shadow:0 0 12px #10b98180} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+const DOCUMENTS = [
+  { id: "D1", title: "RAG Architecture Guide", icon: "📘", chunks: [
+    { id: "D1C1", text: "Retrieval-Augmented Generation (RAG) combines a retrieval system with a generative language model. The core idea: instead of encoding all knowledge into model weights, retrieve relevant context at inference time.", keywords: ["RAG", "retrieval", "generative", "inference"] },
+    { id: "D1C2", text: "Vector databases store embeddings — dense numerical representations of text. When a query arrives, it's embedded and compared against stored vectors using cosine similarity or dot product to find nearest neighbors.", keywords: ["vector database", "embeddings", "cosine similarity", "nearest neighbors"] },
+    { id: "D1C3", text: "Chunking strategy critically affects retrieval quality. Fixed-size chunks (256-512 tokens) work for structured content. Semantic chunking splits on paragraph or sentence boundaries to preserve meaning.", keywords: ["chunking", "token", "semantic", "retrieval quality"] },
+    { id: "D1C4", text: "Reranking is a post-retrieval step where a cross-encoder model scores the top-k candidates against the query. This improves precision but adds latency — typically used when top-k > 10.", keywords: ["reranking", "cross-encoder", "precision", "top-k"] }
+  ]},
+  { id: "D2", title: "LLM Evaluation Handbook", icon: "📗", chunks: [
+    { id: "D2C1", text: "Evaluating LLM outputs requires both automated metrics and human judgment. BLEU and ROUGE measure n-gram overlap but miss semantic similarity. BERTScore uses contextual embeddings for better correlation with human ratings.", keywords: ["evaluation", "BLEU", "ROUGE", "BERTScore"] },
+    { id: "D2C2", text: "Hallucination detection is a key evaluation challenge. Attribution-based scoring checks whether claims in the output are grounded in the provided context. RAG systems can be evaluated on faithfulness: are outputs supported by retrieved docs?", keywords: ["hallucination", "faithfulness", "attribution", "context"] },
+    { id: "D2C3", text: "LLM-as-judge is an emerging evaluation paradigm where a powerful model (GPT-4, Claude) rates outputs on dimensions like helpfulness, accuracy, and safety. Studies show 80%+ agreement with human raters on clean evaluation sets.", keywords: ["LLM-as-judge", "GPT-4", "evaluation dimensions", "human raters"] }
+  ]},
+  { id: "D3", title: "Vector Search Best Practices", icon: "📙", chunks: [
+    { id: "D3C1", text: "HNSW (Hierarchical Navigable Small World) is the most widely used approximate nearest neighbor algorithm. It achieves sub-millisecond query times at billion-scale by building a navigable graph structure over the embedding space.", keywords: ["HNSW", "approximate nearest neighbor", "embedding space", "billion-scale"] },
+    { id: "D3C2", text: "Hybrid search combines dense vector retrieval with sparse keyword matching (BM25). This is crucial when queries contain rare terms or proper nouns that may not generalize well in embedding space.", keywords: ["hybrid search", "BM25", "sparse", "dense", "keyword"] },
+    { id: "D3C3", text: "Embedding model selection impacts retrieval quality significantly. Domain-specific fine-tuned models (e.g., code-specific, medical) outperform general models by 15-25% on in-domain tasks. Dimensionality trade-offs: 768d vs 1536d.", keywords: ["embedding model", "fine-tuned", "domain-specific", "dimensionality"] }
+  ]}
+];
+
+const QUERIES = [
+  { text: "How does cosine similarity work in vector search?", relevant: ["D1C2", "D3C1", "D3C2"] },
+  { text: "What is the best way to evaluate RAG faithfulness?", relevant: ["D2C2", "D2C1", "D2C3"] },
+  { text: "How should I choose chunk sizes for better retrieval?", relevant: ["D1C3", "D1C1", "D1C4"] },
+  { text: "What embedding models should I use for code search?", relevant: ["D3C3", "D3C2", "D1C2"] }
+];
+
+function cosineSim(queryKeywords, chunkKeywords) {
+  if (!queryKeywords.length || !chunkKeywords.length) return 0;
+  const intersection = queryKeywords.filter(k => chunkKeywords.some(ck => ck.toLowerCase().includes(k.toLowerCase()) || k.toLowerCase().includes(ck.toLowerCase())));
+  return Math.min(0.99, 0.3 + (intersection.length / Math.max(queryKeywords.length, chunkKeywords.length)) * 0.7);
+}
+
+const STAGE_INFO = [
+  { id: "ingest", label: "1. Ingest", icon: "📥", color: "#6366f1", desc: "Load source documents" },
+  { id: "chunk", label: "2. Chunk", icon: "✂️", color: "#8b5cf6", desc: "Split into segments" },
+  { id: "embed", label: "3. Embed", icon: "🧬", color: "#06b6d4", desc: "Generate vector representations" },
+  { id: "store", label: "4. Store", icon: "🗄️", color: "#10b981", desc: "Index in vector DB" },
+  { id: "query", label: "5. Query", icon: "🔍", color: "#f59e0b", desc: "Embed user query" },
+  { id: "retrieve", label: "6. Retrieve", icon: "⬆️", color: "#ef4444", desc: "Find top-k nearest" },
+  { id: "generate", label: "7. Generate", icon: "✨", color: "#ec4899", desc: "Augmented generation" }
+];
+
+export default function App() {
+  const [activeStage, setActiveStage] = useState("ingest");
+  const [selectedDoc, setSelectedDoc] = useState("D1");
+  const [queryIdx, setQueryIdx] = useState(0);
+  const [topK, setTopK] = useState(3);
+  const [chunkSize, setChunkSize] = useState(256);
+
+  const allChunks = DOCUMENTS.flatMap(d => d.chunks);
+  const query = QUERIES[queryIdx];
+  const queryKws = query.text.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+
+  const scored = useMemo(() => {
+    return allChunks.map(c => {
+      const docId = c.id.slice(0, 2);
+      const doc = DOCUMENTS.find(d => d.id === docId);
+      const sim = query.relevant.includes(c.id)
+        ? 0.72 + Math.random() * 0.26
+        : 0.1 + Math.random() * 0.38;
+      return { ...c, doc, similarity: parseFloat(sim.toFixed(3)) };
+    }).sort((a, b) => b.similarity - a.similarity);
+  }, [queryIdx]);
+
+  const retrieved = scored.slice(0, topK);
+  const contextText = retrieved.map((c, i) => `[Context ${i+1}] ${c.text}`).join("\n\n");
+
+  const stageIdx = STAGE_INFO.findIndex(s => s.id === activeStage);
+
+  const answers = [
+    "Based on the retrieved context: Cosine similarity measures the angle between two vectors in embedding space. A score of 1.0 means identical direction (highly similar), 0 means orthogonal (unrelated), and -1 means opposite. In vector search, you compute the cosine between the query embedding and each stored document embedding, then return those with the highest scores as most relevant.",
+    "According to the retrieved documentation: RAG faithfulness evaluation checks whether the generated output is grounded in the retrieved context. Attribution-based scoring assigns claims to source passages. A faithfulness score < 0.8 typically indicates hallucination. Tools like RAGAS provide automated faithfulness measurement using LLM-as-judge.",
+    "The retrieved documents recommend: Chunk size depends on your content structure. For structured text (documentation, articles), 256-512 tokens with 10-15% overlap works well. Semantic chunking on paragraph boundaries preserves meaning better than fixed-size. Always evaluate your chunking strategy using retrieval recall@k.",
+    "Based on context: For code search, domain-specific embedding models fine-tuned on code (like CodeBERT or text-embedding-3-large with code data) outperform general models by 15-25%. Consider hybrid search combining dense embeddings with exact-match for function names and symbols."
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+      {/* Header */}
+      <div style={{ background: "#070810", borderBottom: "1px solid #1e2a3a", padding: "10px 20px", display: "flex", alignItems: "center", gap: 14 }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#7dd3fc" }}>🔮 RAG Pipeline Visualizer</div>
+          <div style={{ fontSize: 11, color: "#475569" }}>Explore every stage of Retrieval-Augmented Generation end-to-end</div>
+        </div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "#475569" }}>Top-K:</span>
+          {[1,2,3,5].map(k => <button key={k} onClick={() => setTopK(k)} style={{ padding: "3px 10px", borderRadius: 4, border: "1px solid", fontSize: 12, borderColor: topK === k ? "#06b6d4" : "#1e2a3a", background: topK === k ? "#0e3a45" : "transparent", color: topK === k ? "#67e8f9" : "#475569" }}>{k}</button>)}
+          <span style={{ fontSize: 11, color: "#475569", marginLeft: 8 }}>Chunk (tokens):</span>
+          {[128, 256, 512].map(c => <button key={c} onClick={() => setChunkSize(c)} style={{ padding: "3px 10px", borderRadius: 4, border: "1px solid", fontSize: 12, borderColor: chunkSize === c ? "#8b5cf6" : "#1e2a3a", background: chunkSize === c ? "#2e1a4a" : "transparent", color: chunkSize === c ? "#c4b5fd" : "#475569" }}>{c}</button>)}
+        </div>
+      </div>
+
+      {/* Pipeline stages */}
+      <div style={{ background: "#0a0c16", borderBottom: "1px solid #1e2a3a", padding: "10px 20px", display: "flex", gap: 0, alignItems: "center", overflowX: "auto", flexShrink: 0 }}>
+        {STAGE_INFO.map((s, i) => (
+          <React.Fragment key={s.id}>
+            <button onClick={() => setActiveStage(s.id)} style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "6px 12px", borderRadius: 8, border: `1px solid ${activeStage === s.id ? s.color : "transparent"}`, background: activeStage === s.id ? `${s.color}15` : "transparent", cursor: "pointer", gap: 2, minWidth: 90, flexShrink: 0 }}>
+              <span style={{ fontSize: 18 }}>{s.icon}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: activeStage === s.id ? s.color : "#4a5568" }}>{s.label}</span>
+              <span style={{ fontSize: 9, color: "#334155", textAlign: "center" }}>{s.desc}</span>
+            </button>
+            {i < STAGE_INFO.length - 1 && <div style={{ flex: 1, height: 1, background: i < stageIdx ? "#1e3a2a" : "#1e2a3a", minWidth: 8 }} />}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {/* Main content */}
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "280px 1fr", overflow: "hidden" }}>
+        {/* Left: docs / config */}
+        <div style={{ background: "#070810", borderRight: "1px solid #1e2a3a", overflowY: "auto", padding: 14 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Knowledge Base</div>
+          {DOCUMENTS.map(doc => (
+            <div key={doc.id} onClick={() => setSelectedDoc(doc.id)} style={{ marginBottom: 8, borderRadius: 8, border: `1px solid ${selectedDoc === doc.id ? "#6366f1" : "#1e2a3a"}`, background: selectedDoc === doc.id ? "#1a1635" : "#0a0c16", cursor: "pointer", overflow: "hidden" }}>
+              <div style={{ padding: "8px 10px", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 16 }}>{doc.icon}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: selectedDoc === doc.id ? "#a5b4fc" : "#64748b" }}>{doc.title}</span>
+                <span style={{ marginLeft: "auto", fontSize: 10, color: "#334155" }}>{doc.chunks.length} chunks</span>
+              </div>
+              {selectedDoc === doc.id && doc.chunks.map((chunk, ci) => {
+                const s = scored.find(x => x.id === chunk.id);
+                const isRetrieved = retrieved.find(x => x.id === chunk.id);
+                return (
+                  <div key={chunk.id} style={{ padding: "6px 10px", borderTop: "1px solid #1e2a3a", background: isRetrieved ? "#0f1a0f" : "transparent", animation: "slideIn 0.2s ease" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
+                      <span style={{ fontSize: 9, color: "#334155" }}>Chunk {ci + 1}</span>
+                      {isRetrieved && <span style={{ fontSize: 8, background: "#14532d", color: "#4ade80", padding: "1px 4px", borderRadius: 2, fontWeight: 700 }}>RETRIEVED</span>}
+                      {s && <span style={{ marginLeft: "auto", fontSize: 10, color: isRetrieved ? "#4ade80" : "#475569" }}>{(s.similarity * 100).toFixed(0)}%</span>}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#475569", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{chunk.text}</div>
+                    <div style={{ marginTop: 4, height: 2, background: "#1e2a3a", borderRadius: 1 }}>
+                      {s && <div style={{ height: "100%", background: isRetrieved ? "#10b981" : "#334155", width: `${s.similarity * 100}%`, borderRadius: 1, transition: "width 0.5s" }} />}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+
+        {/* Right: stage detail */}
+        <div style={{ overflowY: "auto", padding: 20 }}>
+          {/* Query selector */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 8 }}>User Query</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {QUERIES.map((q, i) => (
+                <button key={i} onClick={() => setQueryIdx(i)} style={{ padding: "8px 12px", borderRadius: 7, border: `1px solid ${queryIdx === i ? "#f59e0b" : "#1e2a3a"}`, background: queryIdx === i ? "#1a1205" : "#0a0c16", color: queryIdx === i ? "#fcd34d" : "#64748b", fontSize: 13, textAlign: "left", cursor: "pointer", transition: "all 0.2s" }}>
+                  {queryIdx === i ? "▶ " : ""}{q.text}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Stage content */}
+          {activeStage === "ingest" && (
+            <div>
+              <h3 style={{ color: "#a5b4fc", marginBottom: 12 }}>📥 Document Ingestion</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                {DOCUMENTS.map(d => (
+                  <div key={d.id} style={{ background: "#0f1117", border: "1px solid #1e2a3a", borderRadius: 8, padding: 12 }}>
+                    <div style={{ fontSize: 24, marginBottom: 6 }}>{d.icon}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{d.title}</div>
+                    <div style={{ fontSize: 11, color: "#475569" }}>{d.chunks.length} paragraphs · ~{d.chunks.reduce((a,c) => a + c.text.split(" ").length, 0)} words</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 16, background: "#0f1117", border: "1px solid #1e2a3a", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Supported sources</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {["PDF", "Markdown", "HTML", "Confluence", "Notion", "S3", "Database", "API"].map(s => (
+                    <span key={s} style={{ background: "#1a1a2e", border: "1px solid #2d3748", borderRadius: 4, padding: "2px 8px", fontSize: 11, color: "#64748b" }}>{s}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeStage === "chunk" && (
+            <div>
+              <h3 style={{ color: "#c4b5fd", marginBottom: 12 }}>✂️ Chunking Strategy</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+                {[{ name: "Fixed-size", desc: `${chunkSize} tokens per chunk, 10% overlap`, selected: true }, { name: "Semantic", desc: "Split on paragraph/sentence boundaries", selected: false }, { name: "Sliding window", desc: "256 tokens, 128 stride", selected: false }, { name: "Hierarchical", desc: "Parent-child chunk relationships", selected: false }].map(s => (
+                  <div key={s.name} style={{ background: s.selected ? "#1a1535" : "#0f1117", border: `1px solid ${s.selected ? "#8b5cf6" : "#1e2a3a"}`, borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: s.selected ? "#c4b5fd" : "#64748b" }}>{s.name} {s.selected && "✓"}</div>
+                    <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>{s.desc}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#475569", marginBottom: 8 }}>Preview: {DOCUMENTS.find(d => d.id === selectedDoc)?.title}</div>
+              {DOCUMENTS.find(d => d.id === selectedDoc)?.chunks.map((c, i) => (
+                <div key={c.id} style={{ background: "#0a0c16", border: "1px solid #1e2a3a", borderRadius: 6, padding: 10, marginBottom: 6, position: "relative" }}>
+                  <div style={{ position: "absolute", top: -8, left: 8, background: "#2e1a4a", border: "1px solid #8b5cf6", borderRadius: 3, padding: "0 6px", fontSize: 10, color: "#c4b5fd" }}>Chunk {i+1} · ~{Math.ceil(c.text.split(" ").length * 1.3)} tokens</div>
+                  <div style={{ fontSize: 12, lineHeight: 1.6, color: "#94a3b8", marginTop: 4 }}>{c.text}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {activeStage === "embed" && (
+            <div>
+              <h3 style={{ color: "#67e8f9", marginBottom: 12 }}>🧬 Embedding Visualization</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: 12, marginBottom: 12 }}>
+                <div style={{ background: "#0a0c18", border: "1px solid #1e2a3a", borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontSize: 11, color: "#475569", marginBottom: 6 }}>Embedding Model</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#67e8f9" }}>text-embedding-3-large</div>
+                  <div style={{ fontSize: 10, color: "#334155", marginTop: 4 }}>1536 dimensions · $0.00013/1K tokens</div>
+                </div>
+                <div style={{ background: "#0a0c18", border: "1px solid #1e2a3a", borderRadius: 8, padding: 12, display: "flex", gap: 16 }}>
+                  {[{ label: "Total chunks", val: allChunks.length }, { label: "Total tokens", val: "~4,820" }, { label: "Est. cost", val: "$0.0006" }, { label: "Dimensions", val: "1536" }].map(m => (
+                    <div key={m.label}><div style={{ fontSize: 10, color: "#475569" }}>{m.label}</div><div style={{ fontSize: 18, fontWeight: 700, color: "#e2e8f0" }}>{m.val}</div></div>
+                  ))}
+                </div>
+              </div>
+              {/* 2D projection visualization */}
+              <div style={{ background: "#070810", border: "1px solid #1e2a3a", borderRadius: 8, padding: 16, position: "relative", height: 240, overflow: "hidden" }}>
+                <div style={{ fontSize: 10, color: "#334155", marginBottom: 8 }}>2D t-SNE projection of embedding space</div>
+                <svg width="100%" height="190" style={{ overflow: "visible" }}>
+                  {[
+                    {x:18,y:30,c:"#6366f1",label:"D1C1"},{x:22,y:42,c:"#6366f1",label:"D1C2"},{x:14,y:55,c:"#6366f1",label:"D1C3"},{x:28,y:38,c:"#6366f1",label:"D1C4"},
+                    {x:55,y:20,c:"#10b981",label:"D2C1"},{x:62,y:35,c:"#10b981",label:"D2C2"},{x:58,y:48,c:"#10b981",label:"D2C3"},
+                    {x:78,y:60,c:"#f59e0b",label:"D3C1"},{x:85,y:45,c:"#f59e0b",label:"D3C2"},{x:82,y:75,c:"#f59e0b",label:"D3C3"},
+                    {x:40,y:70,c:"#ef4444",label:"Q",isQuery:true}
+                  ].map((p,i) => {
+                    const isRetrieved = retrieved.some(r => r.id === p.label);
+                    return (
+                      <g key={i}>
+                        {isRetrieved && <circle cx={`${p.x}%`} cy={`${p.y}%`} r="10" fill={`${p.c}20`} stroke={p.c} strokeWidth="1" strokeDasharray="3,3" />}
+                        <circle cx={`${p.x}%`} cy={`${p.y}%`} r={p.isQuery ? 7 : 5} fill={p.c} opacity={p.isQuery ? 1 : 0.8} />
+                        <text x={`${p.x}%`} y={`${p.y - 3}%`} fontSize="8" fill="#64748b" textAnchor="middle">{p.label}</text>
+                      </g>
+                    );
+                  })}
+                  {/* Cluster labels */}
+                  <text x="20%" y="5%" fontSize="9" fill="#6366f1" textAnchor="middle">RAG Guide</text>
+                  <text x="60%" y="8%" fontSize="9" fill="#10b981" textAnchor="middle">Eval Handbook</text>
+                  <text x="82%" y="35%" fontSize="9" fill="#f59e0b" textAnchor="middle">Vector Search</text>
+                  <text x="40%" y="85%" fontSize="9" fill="#ef4444" textAnchor="middle">Query</text>
+                </svg>
+              </div>
+            </div>
+          )}
+
+          {(activeStage === "store" || activeStage === "query" || activeStage === "retrieve") && (
+            <div>
+              <h3 style={{ color: activeStage === "store" ? "#34d399" : activeStage === "query" ? "#fbbf24" : "#f87171", marginBottom: 12 }}>
+                {activeStage === "store" ? "🗄️ Vector Store" : activeStage === "query" ? "🔍 Query Processing" : "⬆️ Top-K Retrieval"}
+              </h3>
+
+              {activeStage === "retrieve" && (
+                <div style={{ marginBottom: 16, background: "#0a0c16", border: "1px solid #1e2a3a", borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontSize: 11, color: "#f59e0b", marginBottom: 6, fontWeight: 600 }}>▶ Query: "{query.text}"</div>
+                  <div style={{ fontSize: 11, color: "#475569" }}>Embedded → searching {allChunks.length} vectors → returning top {topK}</div>
+                </div>
+              )}
+
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#475569", marginBottom: 10 }}>
+                {activeStage === "retrieve" ? `Top ${topK} Retrieved Chunks (similarity scores):` : "All chunks in vector store:"}
+              </div>
+
+              {(activeStage === "retrieve" ? retrieved : scored).map((c, i) => (
+                <div key={c.id} style={{ background: "#0a0c16", border: `1px solid ${activeStage === "retrieve" ? "#14532d" : "#1e2a3a"}`, borderRadius: 8, padding: 10, marginBottom: 8, animation: "slideIn 0.2s ease" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 10, color: "#334155" }}>#{i + 1}</span>
+                    <span style={{ fontSize: 11, color: c.doc?.id === "D1" ? "#a5b4fc" : c.doc?.id === "D2" ? "#6ee7b7" : "#fcd34d" }}>{c.doc?.title} · {c.id}</span>
+                    <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ width: 80, height: 4, background: "#1e2a3a", borderRadius: 2 }}>
+                        <div style={{ height: "100%", background: c.similarity > 0.7 ? "#10b981" : c.similarity > 0.5 ? "#f59e0b" : "#ef4444", width: `${c.similarity * 100}%`, borderRadius: 2, transition: "width 0.5s" }} />
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: c.similarity > 0.7 ? "#10b981" : c.similarity > 0.5 ? "#f59e0b" : "#ef4444", minWidth: 36 }}>{(c.similarity * 100).toFixed(0)}%</span>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#64748b", lineHeight: 1.6 }}>{c.text}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {activeStage === "generate" && (
+            <div>
+              <h3 style={{ color: "#f9a8d4", marginBottom: 12 }}>✨ Augmented Generation</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: "#475569", marginBottom: 8, fontWeight: 600 }}>INJECTED CONTEXT (top {topK} chunks)</div>
+                  <div style={{ background: "#0a0c16", border: "1px solid #1e2a3a", borderRadius: 8, padding: 10, fontSize: 11, lineHeight: 1.7, color: "#64748b", maxHeight: 300, overflowY: "auto", fontFamily: "Consolas, monospace", whiteSpace: "pre-wrap" }}>
+                    {contextText}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: "#475569", marginBottom: 8, fontWeight: 600 }}>GENERATED RESPONSE</div>
+                  <div style={{ background: "#0a100a", border: "1px solid #14532d", borderRadius: 8, padding: 10, fontSize: 12, lineHeight: 1.8, color: "#86efac", maxHeight: 300, overflowY: "auto" }}>
+                    {answers[queryIdx]}
+                  </div>
+                  <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                    {[{ label: "Faithfulness", val: "0.96", color: "#10b981" }, { label: "Relevance", val: "0.91", color: "#06b6d4" }, { label: "Grounded", val: "Yes", color: "#8b5cf6" }].map(m => (
+                      <div key={m.label} style={{ background: "#0a0c16", border: "1px solid #1e2a3a", borderRadius: 6, padding: "6px 10px", flex: 1, textAlign: "center" }}>
+                        <div style={{ fontSize: 10, color: "#475569" }}>{m.label}</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: m.color }}>{m.val}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
